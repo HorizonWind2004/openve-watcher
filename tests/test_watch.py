@@ -127,12 +127,12 @@ def test_process_repo_scores_only_complete_and_unscored(tmp_path, monkeypatch):
 
 def test_process_repo_survives_single_sample_failure(tmp_path, monkeypatch, capsys):
     files = [
-        "samples/t/a/meta.json",
-        "samples/t/a/original.mp4",
-        "samples/t/a/edited.mp4",
-        "samples/t/b/meta.json",
-        "samples/t/b/original.mp4",
-        "samples/t/b/edited.mp4",
+        "samples/global_style/a/meta.json",
+        "samples/global_style/a/original.mp4",
+        "samples/global_style/a/edited.mp4",
+        "samples/local_add/b/meta.json",
+        "samples/local_add/b/original.mp4",
+        "samples/local_add/b/edited.mp4",
     ]
     api = FakeApi(files=files)
     args = _args(tmp_path)
@@ -140,7 +140,7 @@ def test_process_repo_survives_single_sample_failure(tmp_path, monkeypatch, caps
     def fake_fetch(_api, _repo, edited_type, base, _cache):
         if base == "a":
             raise RuntimeError("下载失败")
-        return manifest.SampleMeta(base=base, edited_type="global_style", prompt="p"), Path("o"), Path("e")
+        return manifest.SampleMeta(base=base, edited_type=edited_type, prompt="p"), Path("o"), Path("e")
 
     monkeypatch.setattr(watch, "fetch_sample", fake_fetch)
     monkeypatch.setattr("openve_watcher.gemini.evaluate_video_pair", lambda *a, **k: ([5, 5, 5], "raw"))
@@ -151,7 +151,11 @@ def test_process_repo_survives_single_sample_failure(tmp_path, monkeypatch, caps
 
 
 def test_process_repo_pushes_scores_when_asked(tmp_path, monkeypatch):
-    files = ["samples/t/a/meta.json", "samples/t/a/original.mp4", "samples/t/a/edited.mp4"]
+    files = [
+        "samples/global_style/a/meta.json",
+        "samples/global_style/a/original.mp4",
+        "samples/global_style/a/edited.mp4",
+    ]
     api = FakeApi(files=files)
     args = _args(tmp_path, push_scores=True)
     monkeypatch.setattr(
@@ -171,3 +175,18 @@ def test_append_result_is_line_per_row(tmp_path):
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
     assert watch.scored_bases(path) == {"x", "y"}
+
+
+def test_score_sample_rejects_meta_directory_mismatch(tmp_path, monkeypatch):
+    """目录说是 global_style、meta 说是 local_add，说明数据坏了，必须失败。
+
+    此时按哪一边都可能用错评分标准，猜一个比报错更糟。
+    """
+    monkeypatch.setattr(
+        watch,
+        "fetch_sample",
+        lambda *a: (manifest.SampleMeta(base="a", edited_type="local_add", prompt="p"), Path("o"), Path("e")),
+    )
+    monkeypatch.setattr("openve_watcher.gemini.evaluate_video_pair", lambda *a, **k: ([5, 5, 5], "raw"))
+    with pytest.raises(ValueError, match="不一致"):
+        watch.score_sample(FakeApi(), "r", "global_style", "a", _args(tmp_path), ["k"], 0)

@@ -1,9 +1,13 @@
 # openve-watcher
 
-把 OpenVE 的**推理**和**Gemini 打分**拆到两台机器上，中间用 HuggingFace 传递。
+爬 HuggingFace 上的 OpenVE 推理结果，对新出现的样本自动跑 Gemini 打分。
 
-为什么要拆：跑推理的 GPU 集群往往没有 Gemini 的网络访问或 API key，而有 key 的机器
-没有 GPU。这个仓库让两边各做自己能做的事，互相不需要 SSH、不需要共享文件系统。
+**这是客户端。** 服务端（跑推理、往 HF 上传的那一侧）由我们运行——我们往 HF 传一个
+public dataset 仓库，这个爬虫就能自动识别到并开始打分。你只需要一个 HF token
+和一个 Gemini key，**不需要 GPU、不需要 OpenVE-Bench、不需要访问我们的集群**。
+
+为什么要拆：跑推理的 GPU 集群没有 Gemini 的网络访问和 API key，而有 key 的机器
+没有 GPU。两边各做自己能做的事，互相不需要 SSH、不需要共享文件系统。
 
 ```
 集群（有 GPU，没 Gemini key）          HuggingFace              打分机（有 Gemini key，没 GPU）
@@ -39,18 +43,73 @@ scores/<model>_gemini_video_score.jsonl        打分侧回传（可选）
 两侧装的东西不一样。
 
 ```bash
-# 集群侧：只要 huggingface_hub，不要装 Gemini SDK
-pip install -e .
-
-# 打分侧：需要 google-genai
+# 客户端（打分侧，你跑的）：需要 Gemini SDK
 pip install -e '.[score]'
+
+# 服务端（集群侧，我们跑的）：只要 huggingface_hub，不装 Gemini SDK
+pip install -e .
 ```
 
 > **集群上千万别往共享虚拟环境里 pip 装东西。** 我们踩过一次：装 flash-attn 时 pip
 > 顺手把 cuDNN 从 9.25.1.1 降到 9.10.2.21，教师侧 Conv3d 静默回退到
 > `slow_conv_dilated3d`，训练慢了两倍多，排查了几个小时。装到独立 target 或独立 venv。
 
-## 集群侧：上传
+## 客户端：爬取并打分（你要跑的就是这个）
+
+```bash
+export HF_TOKEN=hf_xxx
+export GEMINI_API_KEY=key1,key2      # 或用 --gemini-key-file，每行一个
+
+pip install -e '.[score]'
+
+openve-watch \
+  --author sanaka87 \
+  --prefix openve_ \
+  --out-dir ./openve-scores \
+  --max-workers 4 \
+  --push-scores \
+  --interval 300
+```
+
+挂着不用管。我们每传一个新 run，它下一轮就会发现并开始打分；同一个 run 里
+推理边跑边传，它也会持续把新样本补上。
+
+- `--push-scores` 把分数回传到同一个 HF 仓库，这样我们那边不用 key 也能读到结果。
+- `--once` 只跑一轮；`--limit N` 每个仓库每轮最多打 N 条（试水用）。
+- 单条失败只打到 stderr，不中断整轮，下一轮会自动重试。
+
+### 本地进度台账
+
+每个仓库在 `--out-dir` 下有两个文件：
+
+```
+openve-scores/sanaka87__openve_33f_fa_cfg1/
+├── progress.txt                                 一行一条，只记「做过没做过」
+└── gemini-2.5-pro_gemini_video_score.jsonl      完整结果，含 Gemini 原始回复
+```
+
+`progress.txt` 长这样，简单到可以直接 `wc -l` 数进度：
+
+```
+sanaka87/openve_33f_fa_cfg1	global_style/0000_global_style_Apply_the_Impression
+sanaka87/openve_33f_fa_cfg1	local_add/0012_local_add_Add_a_cat
+```
+
+两份台账**取并集**判定已完成，一个防重复、一个防漏做：
+
+- **防重复打分**：任一文件说做过就跳过。jsonl 删了也不会重打，因为 txt 还在。
+- **防漏打分**：写入顺序固定「先 jsonl，后 txt」。若在两次写入之间崩溃，
+  txt 缺这条但 jsonl 有，下一轮 `reconcile` 会把它补回 txt——**反过来永远不会发生**，
+  所以不存在「txt 说做过、其实没打」的情况。
+- **失败的样本不进台账**，下一轮必然重试。
+- 每轮都打印 `仓库 N 条 / 已打分 M 条 / 待打分 K 条`，漏没漏一眼就看得出来。
+- txt 里坏掉的行会被忽略而不是让程序崩——这个文件本来就是崩溃现场的产物。
+
+要重打某一条：从 `progress.txt` 里删掉那一行，并从 jsonl 里删掉对应的行。
+
+---
+
+## 服务端：上传（我们这侧运行，你不用管）
 
 ```bash
 export HF_TOKEN=hf_xxx
@@ -74,30 +133,6 @@ openve-push \
 
 **幂等**：每轮都先读仓库文件列表，只传缺的。重复运行不会重传。
 每个样本一次 `upload_folder`（三个文件一个 commit），所以打分侧看不到半个样本。
-
-## 打分侧：爬取并打分
-
-```bash
-export HF_TOKEN=hf_xxx
-export GEMINI_API_KEY=key1,key2      # 或用 --gemini-key-file，每行一个
-
-openve-watch \
-  --author sanaka87 \
-  --prefix openve_ \
-  --out-dir ./openve-scores \
-  --max-workers 4 \
-  --push-scores \
-  --interval 300
-```
-
-- 默认按 **作者 + 名字前缀** 发现仓库，因为这个不需要人工维护。
-  `--collection <slug>` 可以改成从 collection 读，但漏加一个仓库就会被静默跳过。
-- `--push-scores` 把 jsonl 回传到同一个 HF 仓库，集群侧就能直接读到分数。
-- `--once` 只跑一轮；`--limit N` 每个仓库每轮最多打 N 条。
-- 单条失败只打印到 stderr，不中断整轮。
-
-**断点续跑**：结果按行追加到 `openve_<model>_gemini_video_score.jsonl`，
-每次启动读回已有结果跳过。写一半被截断的行会被忽略并自动重打那一条。
 
 ## 与官方 Kiwi-Edit 的对齐
 
@@ -135,9 +170,11 @@ openve-watch \
 
 ```bash
 pip install -e '.[dev]'
-pytest -q          # 68 passed，全部离线，不碰 HF 也不碰 Gemini
+pytest -q          # 80 passed，全部离线，不碰 HF 也不碰 Gemini
 ```
 
 HF 和 Gemini 都用假对象替掉，所以测试可以在 CI 里跑。覆盖的关键行为：
-半个样本被跳过、重复上传幂等、断点续跑忽略截断行、单条失败不拖垮整轮、
-派生视频不被误当主视频、以及上面那张对齐表的每一行。
+半个样本被跳过、重复上传幂等、只剩 txt 也不会重复调用 Gemini、
+只剩 jsonl 会补回 txt 并跳过、失败的样本不进台账因而会重试、
+`meta.json` 与目录类别不一致时直接失败、派生视频不被误当主视频、
+以及上面那张对齐表的每一行。

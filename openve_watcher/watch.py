@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import manifest, parse, prompts
+from . import manifest, parse, progress, prompts
 
 DEFAULT_MODEL = "gemini-2.5-pro"
 DEFAULT_PREFIX = "openve_"
@@ -116,6 +116,12 @@ def score_sample(api, repo_id, edited_type, base, args, keys, key_index):
     from .gemini import evaluate_video_pair
 
     meta, original, edited = fetch_sample(api, repo_id, edited_type, base, args.cache_dir)
+    # 上传端把类别同时写进目录名和 meta.json。两者不一致说明数据坏了，
+    # 此时按哪个都可能用错评分标准，所以直接失败而不是猜一个。
+    if (meta.edited_type, meta.base) != (edited_type, base):
+        raise ValueError(
+            f"meta.json 与目录不一致: 目录 {edited_type}/{base}，meta {meta.edited_type}/{meta.base}"
+        )
     prompt = system_prompt(meta.edited_type, meta.prompt, args.json_mode)
     scores, raw = evaluate_video_pair(
         original,
@@ -148,12 +154,24 @@ def append_result(jsonl_path, row):
 
 
 def process_repo(api, repo_id, args, keys):
-    """对一个仓库里所有未打分的完整样本打分，返回本轮新增条数。"""
+    """对一个仓库里所有未打分的完整样本打分，返回 (新增, 仓库总数, 已完成)。"""
     files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
     samples = manifest.complete_samples(files)
-    out_path = Path(args.out_dir) / repo_id.replace("/", "__") / Path(manifest.score_path(args.model)).name
-    done = scored_bases(out_path)
-    pending = [(t, b) for (t, b) in sorted(samples) if b not in done]
+
+    repo_dir = Path(args.out_dir) / repo_id.replace("/", "__")
+    out_path = repo_dir / Path(manifest.score_path(args.model)).name
+    state = progress.state_path(args.out_dir, repo_id)
+
+    # 两份台账取并集判定已完成：txt 只记做过没做过，jsonl 存完整结果。
+    # 先把只在 jsonl 里的补进 txt，覆盖「写完 jsonl 就崩溃」和旧版本升级两种情况。
+    from_jsonl = {(t, b) for (t, b) in sorted(samples) if b in scored_bases(out_path)}
+    recovered = progress.reconcile(state, repo_id, from_jsonl)
+    if recovered:
+        print(f"[reconcile] {repo_id}: 从 jsonl 补回 {recovered} 条进度", flush=True)
+    done = progress.load(state) | from_jsonl
+
+    pending = [(t, b) for (t, b) in sorted(samples) if (t, b) not in done]
+    print(f"[progress] {repo_id}: {progress.summarise(len(samples), len(done), len(pending))}", flush=True)
     if args.limit:
         pending = pending[: args.limit]
     if not pending:
@@ -162,11 +180,11 @@ def process_repo(api, repo_id, args, keys):
     added = 0
     if args.max_workers <= 1:
         for index, (edited_type, base) in enumerate(pending):
-            added += _one(api, repo_id, edited_type, base, args, keys, index, out_path)
+            added += _one(api, repo_id, edited_type, base, args, keys, index, out_path, state)
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as pool:
             futures = {
-                pool.submit(_one, api, repo_id, t, b, args, keys, i, out_path): (t, b)
+                pool.submit(_one, api, repo_id, t, b, args, keys, i, out_path, state): (t, b)
                 for i, (t, b) in enumerate(pending)
             }
             for future in as_completed(futures):
@@ -176,13 +194,16 @@ def process_repo(api, repo_id, args, keys):
     return added, len(samples), len(done)
 
 
-def _one(api, repo_id, edited_type, base, args, keys, key_index, out_path):
+def _one(api, repo_id, edited_type, base, args, keys, key_index, out_path, state):
     try:
         row = score_sample(api, repo_id, edited_type, base, args, keys, key_index)
     except Exception as exc:  # noqa: BLE001 - 单条失败不该终止整轮
         print(f"[fail] {repo_id} {edited_type}/{base}: {exc}", file=sys.stderr, flush=True)
         return 0
+    # 顺序不能反：jsonl 先写。若在两次写入之间崩溃，txt 缺这条但 jsonl 有，
+    # 下一轮 reconcile 会补上；反过来会造成「txt 说做过、结果却不存在」。
     append_result(out_path, row)
+    progress.append(state, repo_id, edited_type, base)
     print(f"[scored] {repo_id} {edited_type}/{base} -> {row['scores']}", flush=True)
     return 1
 
