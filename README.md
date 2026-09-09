@@ -146,7 +146,13 @@ openve-push \
 `_reason_edit.mp4`（多一帧推理帧）是派生产物，**不会**被当成待打分的主视频。
 
 **幂等**：每轮都先读仓库文件列表，只传缺的。重复运行不会重传。
-每个样本一次 `upload_folder`（三个文件一个 commit），所以打分侧看不到半个样本。
+
+**批量提交**：HF 限制**每个仓库每小时 256 次 commit**。一条样本一次 commit 时，
+一个 388 条的 run 需要 388 次，必然撞限；补传积压更是瞬间突发（实测在第 255 条
+挂掉，报 `429 Too Many Requests`）。所以默认 `--batch-size 25`，一批一次 commit，
+388 条只要 16 次。批内每条样本仍是要么整条可见、要么完全不可见，
+打分侧看不到半个样本这个性质不变。撞到 429 会等 10 分钟再重试，而不是几秒内
+把重试次数烧光。
 
 ## 与官方 Kiwi-Edit 的对齐
 
@@ -184,7 +190,7 @@ openve-push \
 
 ```bash
 pip install -e '.[dev]'
-pytest -q          # 84 passed，全部离线，不碰 HF 也不碰 Gemini
+pytest -q          # 88 passed，全部离线，不碰 HF 也不碰 Gemini
 ```
 
 HF 和 Gemini 都用假对象替掉，所以测试可以在 CI 里跑。覆盖的关键行为：

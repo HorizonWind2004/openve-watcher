@@ -90,9 +90,12 @@ class FakeApi:
         return list(self.files)
 
     def upload_folder(self, *, repo_id, repo_type, folder_path, path_in_repo, commit_message):
+        # 一次调用 = 一次 commit。批量提交时 folder 是嵌套的，所以要递归。
         self.uploads.append(path_in_repo)
-        for child in sorted(Path(folder_path).iterdir()):
-            self.files.append(f"{path_in_repo}/{child.name}")
+        root = Path(folder_path)
+        for child in sorted(root.rglob("*")):
+            if child.is_file():
+                self.files.append(f"{path_in_repo}/{child.relative_to(root).as_posix()}")
 
 
 def test_push_once_uploads_self_contained_sample(bench, tmp_path):
@@ -105,9 +108,12 @@ def test_push_once_uploads_self_contained_sample(bench, tmp_path):
     count = push.push_once(api, "sanaka87/openve_test", push.discover(inference, table))
 
     assert count == 1
-    assert api.uploads == ["samples/global_style/0000_a"]
-    names = {Path(f).name for f in api.files}
-    assert names == {manifest.META_NAME, manifest.ORIGINAL_NAME, manifest.EDITED_NAME}
+    assert api.uploads == [manifest.SAMPLES_ROOT]
+    assert sorted(api.files) == [
+        f"samples/global_style/0000_a/{manifest.EDITED_NAME}",
+        f"samples/global_style/0000_a/{manifest.META_NAME}",
+        f"samples/global_style/0000_a/{manifest.ORIGINAL_NAME}",
+    ]
 
 
 def test_push_once_is_idempotent(bench, tmp_path):
@@ -152,3 +158,68 @@ def test_stage_sample_writes_meta_with_prompt(tmp_path, bench):
     root = push.stage_sample(tmp_path / "stage", "0000_a", "global_style", "印象派化", original, edited)
     meta = manifest.SampleMeta.from_json((root / manifest.META_NAME).read_text(encoding="utf-8"))
     assert meta.prompt == "印象派化" and meta.edited_type == "global_style"
+
+
+def test_batching_collapses_many_samples_into_few_commits(bench, tmp_path):
+    """HF 每仓库每小时只允许 256 次 commit，所以一条一次提交必然撞限。"""
+    csv_path, bench_dir = bench
+    rows = []
+    with csv_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["edited_type", "prompt", "original_video"])
+        for i in range(2, 12):
+            row = {
+                "edited_type": "global_style",
+                "prompt": f"编辑 {i}",
+                "original_video": f"videos/{i:04d}_c.mp4",
+            }
+            (bench_dir / "videos" / f"{i:04d}_c.mp4").write_bytes(b"orig")
+            writer.writerow(row)
+            rows.append(row)
+    table = push.load_bench(csv_path, bench_dir)
+    inference = tmp_path / "inf"
+    for i in range(2, 12):
+        make_case(inference, "global_style", f"{i:04d}_c")
+    samples = push.discover(inference, table)
+    assert len(samples) == 10
+
+    api = FakeApi()
+    assert push.push_once(api, "r", samples, batch_size=4) == 10
+    assert len(api.uploads) == 3, "10 条按 4 一批应当只有 3 次 commit"
+    assert len([f for f in api.files if f.endswith(manifest.META_NAME)]) == 10
+
+
+def test_rate_limited_commit_waits_then_succeeds(monkeypatch):
+    """429 要等窗口滚动，不能像普通错误那样几秒内重试掉尝试次数。"""
+    slept = []
+    monkeypatch.setattr(push.time, "sleep", lambda s: slept.append(s))
+    calls = []
+
+    def action():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("429 Client Error: Too Many Requests")
+        return "ok"
+
+    assert push._commit_with_backoff(action, rate_limit_wait=600.0) == "ok"
+    assert slept == [600.0], "限流应当长等，而不是 2 秒"
+
+
+def test_ordinary_error_backs_off_briefly(monkeypatch):
+    slept = []
+    monkeypatch.setattr(push.time, "sleep", lambda s: slept.append(s))
+    calls = []
+
+    def action():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("500 internal error")
+        return "ok"
+
+    assert push._commit_with_backoff(action) == "ok"
+    assert slept == [2], "普通错误短退避"
+
+
+def test_rate_limit_detection():
+    assert push._is_rate_limited(RuntimeError("429 Client Error")) is True
+    assert push._is_rate_limited(RuntimeError("Too Many Requests")) is True
+    assert push._is_rate_limited(RuntimeError("404 not found")) is False
