@@ -190,3 +190,29 @@ def test_score_sample_rejects_meta_directory_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr("openve_watcher.gemini.evaluate_video_pair", lambda *a, **k: ([5, 5, 5], "raw"))
     with pytest.raises(ValueError, match="不一致"):
         watch.score_sample(FakeApi(), "r", "global_style", "a", _args(tmp_path), ["k"], 0)
+
+
+def test_preflight_disables_hf_transfer_when_package_missing(monkeypatch, capsys):
+    """环境开了 hf_transfer 但包没装时，下载会炸；preflight 要把它关掉。"""
+    monkeypatch.setenv("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    monkeypatch.setitem(__import__("sys").modules, "hf_transfer", None)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "hf_transfer":
+            raise ImportError("no hf_transfer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert watch.preflight_env() == ["HF_HUB_ENABLE_HF_TRANSFER"]
+    import os
+
+    assert os.environ["HF_HUB_ENABLE_HF_TRANSFER"] == "0"
+    assert "hf_transfer" in capsys.readouterr().err
+
+
+def test_preflight_leaves_env_alone_when_unset(monkeypatch):
+    monkeypatch.delenv("HF_HUB_ENABLE_HF_TRANSFER", raising=False)
+    assert watch.preflight_env() == []

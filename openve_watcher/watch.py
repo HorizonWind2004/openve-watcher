@@ -18,6 +18,30 @@ DEFAULT_MODEL = "gemini-2.5-pro"
 DEFAULT_PREFIX = "openve_"
 
 
+def preflight_env():
+    """关掉那些环境里开了、包却没装的加速开关。
+
+    HF_HUB_ENABLE_HF_TRANSFER=1 而 hf_transfer 未安装时，huggingface_hub 的
+    **下载**会直接抛 ValueError，上传却照常——所以推送侧一切正常，
+    爬取侧一上手就炸。hf_transfer 只是个加速器，关掉它只是慢一点，
+    比让使用者去读一段无关的堆栈要好。返回被关掉的开关名，便于测试。
+    """
+    disabled = []
+    if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") in ("1", "true", "True"):
+        try:
+            import hf_transfer  # noqa: F401
+        except ImportError:
+            os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+            disabled.append("HF_HUB_ENABLE_HF_TRANSFER")
+            print(
+                "[preflight] 环境里开了 HF_HUB_ENABLE_HF_TRANSFER 但没装 hf_transfer，"
+                "已关闭（下载会稍慢）。要加速就 pip install hf_transfer。",
+                file=sys.stderr,
+                flush=True,
+            )
+    return disabled
+
+
 def load_api_keys(key_file, env_name="GEMINI_API_KEY"):
     """从文件（每行一个 key）或环境变量读取 key，支持多 key 轮询。"""
     keys = []
@@ -247,6 +271,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    preflight_env()
     from huggingface_hub import HfApi
 
     keys = load_api_keys(args.gemini_key_file)
