@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openve-watcher"
+version = "0.1.0"
+description = "通过 HuggingFace 把 OpenVE 推理与 Gemini 打分拆到两台机器上"
+requires-python = ">=3.10"
+dependencies = [
+    "huggingface-hub>=0.34",
+]
+
+[project.optional-dependencies]
+# 只有打分侧需要 Gemini SDK；集群侧装了纯属浪费，还可能动到共享环境。
+score = ["google-genai>=1.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+openve-push = "openve_watcher.push:main"
+openve-watch = "openve_watcher.watch:main"
+
+[tool.setuptools.packages.find]
+include = ["openve_watcher*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
