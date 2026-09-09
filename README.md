@@ -56,27 +56,41 @@ pip install -e .
 
 ## 客户端：爬取并打分（你要跑的就是这个）
 
+**不需要 HF token**——结果仓库是公开数据集，匿名就能发现和下载。
+只需要一个 Gemini API key。
+
+### 第一步：冒烟测试
+
+先跑这个，**不要跳过**。它会真的打一条分数，把整条链路验穿：
+
 ```bash
-export HF_TOKEN=hf_xxx
-export GEMINI_API_KEY=key1,key2      # 或用 --gemini-key-file，每行一个
-
 pip install -e '.[score]'
+export GEMINI_API_KEY=xxx
 
-openve-watch \
-  --author sanaka87 \
-  --prefix openve_ \
-  --out-dir ./openve-scores \
-  --max-workers 4 \
-  --push-scores \
-  --interval 300
+openve-smoketest --out-dir ./scores --git-publish
+```
+
+每一步都是 `PASS` / `FAIL`，失败时直接告诉你该改什么，全过才会说
+「可以挂 openve-watch 了」，退出码 0。加 `--no-gemini` 可以只验 HF 侧、不花 key。
+
+### 第二步：挂上去
+
+```bash
+tmux new -s openve
+openve-watch --out-dir ./scores --max-workers 4 --git-publish --interval 300
 ```
 
 挂着不用管。我们每传一个新 run，它下一轮就会发现并开始打分；同一个 run 里
 推理边跑边传，它也会持续把新样本补上。
 
-- `--push-scores` 把分数回传到同一个 HF 仓库，这样我们那边不用 key 也能读到结果。
-- `--once` 只跑一轮；`--limit N` 每个仓库每轮最多打 N 条（试水用）。
+- `--git-publish` 每轮把 `--out-dir` 的改动提交并推到 `origin`，所以
+  **把 `--out-dir` 指到你 fork 的 clone 里面**（例如 `./scores`）。没有新分数就不提交。
+- `--once` 只跑一轮；`--limit N` 每个仓库每轮最多打 N 条。
 - 单条失败只打到 stderr，不中断整轮，下一轮会自动重试。
+- 模型默认 `gemini-2.5-pro`，与官方 Kiwi-Edit 一致，**不要改**——换模型分数就不可比了。
+
+> `--push-scores` 是回写到**源** HF 仓库的，只有产出推理结果的人有写权限。
+> 协作者请用 `--git-publish`。
 
 ### 本地进度台账
 
@@ -150,7 +164,7 @@ openve-push \
 基准是 `tests/data/kiwi_eval_prompts.py`——官方文件的逐字副本。
 **这些测试失败时，要改的是 `prompts.py`，不是基准。** 评分标准一动，分数就不可比了。
 
-### 已知的两处偏离，都是刻意的
+### 已知的三处偏离，都是刻意的
 
 1. **`prompt_type` 多了 5 个键。** 官方只映射 5 类
    (`global_style` / `local_change` / `background_change` / `local_remove` / `local_add`)，
@@ -170,7 +184,7 @@ openve-push \
 
 ```bash
 pip install -e '.[dev]'
-pytest -q          # 80 passed，全部离线，不碰 HF 也不碰 Gemini
+pytest -q          # 84 passed，全部离线，不碰 HF 也不碰 Gemini
 ```
 
 HF 和 Gemini 都用假对象替掉，所以测试可以在 CI 里跑。覆盖的关键行为：

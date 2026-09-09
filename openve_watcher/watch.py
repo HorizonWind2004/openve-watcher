@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import manifest, parse, progress, prompts
+from . import manifest, parse, progress, prompts, publish
 
 DEFAULT_MODEL = "gemini-2.5-pro"
 DEFAULT_PREFIX = "openve_"
@@ -262,7 +262,17 @@ def build_parser():
     parser.add_argument("--timeout", type=float, default=600.0, help="单条上传+打分的超时（秒）")
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--json-mode", action="store_true", help="要求 Gemini 返回 JSON")
-    parser.add_argument("--push-scores", action="store_true", help="把分数回传到同一个 HF 仓库")
+    parser.add_argument(
+        "--push-scores",
+        action="store_true",
+        help="把分数回传到源 HF 仓库；只有产出推理结果的人有写权限，协作者用 --git-publish",
+    )
+    parser.add_argument(
+        "--git-publish",
+        action="store_true",
+        help="把 --out-dir 的改动提交并推到自己 fork 的 GitHub 仓库",
+    )
+    parser.add_argument("--git-remote", default="origin", help="--git-publish 推到哪个 remote")
     parser.add_argument("--limit", type=int, default=0, help="每个仓库每轮最多打多少条（0 = 不限）")
     parser.add_argument("--once", action="store_true", help="只跑一轮就退出")
     parser.add_argument("--interval", type=float, default=300.0, help="轮询间隔（秒）")
@@ -291,6 +301,8 @@ def main(argv=None):
                 print(f"[error] {repo_id}: {exc}", file=sys.stderr, flush=True)
                 continue
             print(f"[watch] {repo_id}: 仓库 {total} 条，已打分 {done}，本轮新增 {added}", flush=True)
+        if args.git_publish:
+            print(f"[git] {publish.publish(args.out_dir, repo_root=args.out_dir, remote=args.git_remote)}", flush=True)
         if args.once:
             return 0
         time.sleep(args.interval)

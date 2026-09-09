@@ -19,6 +19,7 @@ dev = ["pytest>=8"]
 [project.scripts]
 openve-push = "openve_watcher.push:main"
 openve-watch = "openve_watcher.watch:main"
+openve-smoketest = "openve_watcher.smoketest:main"
 
 [tool.setuptools.packages.find]
 include = ["openve_watcher*"]

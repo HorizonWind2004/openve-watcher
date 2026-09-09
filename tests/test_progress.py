@@ -176,3 +176,21 @@ def test_pending_count_reveals_missed_samples(tmp_path, monkeypatch, capsys):
     watch.process_repo(FakeApi(files), "r", args, ["k"])
     out = capsys.readouterr().out
     assert "仓库 2 条 / 已打分 0 条 / 待打分 2 条" in out
+
+
+def test_publish_handles_not_yet_created_out_dir(tmp_path):
+    """--out-dir ./scores 首次运行前不存在，不该崩，也不该误判为「不是 git 仓库」。"""
+    from openve_watcher import publish
+
+    missing = tmp_path / "a" / "b" / "scores"
+    assert publish.nearest_existing(missing) == tmp_path.resolve()
+    # tmp_path 不是 git 仓库，所以应当返回 False 而不是抛 FileNotFoundError
+    assert publish.is_git_repo(missing) is False
+
+
+def test_publish_finds_repo_through_missing_subdir():
+    """clone 里还没建的 ./scores 应当被认成「在 git 仓库里」。"""
+    from openve_watcher import publish
+
+    root = Path(__file__).resolve().parents[1]
+    assert publish.is_git_repo(root / "does_not_exist_yet" / "scores") is True
