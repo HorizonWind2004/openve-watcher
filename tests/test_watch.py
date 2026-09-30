@@ -259,3 +259,55 @@ def test_process_repo_official_only_skips_non_official_types_quietly(tmp_path, m
     assert (added, total) == (1, 5), "只打 global_style"
     captured = capsys.readouterr()
     assert "[skip]" in captured.out and "[fail]" not in captured.err
+
+
+class FakeSpaceApi(FakeApi):
+    def __init__(self, fail=False, **kw):
+        super().__init__(**kw)
+        self.folders = []
+        self.fail = fail
+
+    def upload_folder(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("网络断了")
+        self.folders.append((kwargs["repo_id"], kwargs["path_in_repo"], kwargs["repo_type"]))
+
+
+def test_publish_repo_to_space_uploads_that_repo_only(tmp_path):
+    out = tmp_path / "out"
+    (out / "sanaka87__openve_a").mkdir(parents=True)
+    (out / "sanaka87__openve_a" / "x.jsonl").write_text("{}\n")
+    api = FakeSpaceApi()
+    assert watch.publish_repo_to_space(api, "sanaka87/OpenVE-score", "sanaka87/openve_a", str(out))
+    assert api.folders == [("sanaka87/OpenVE-score", "sanaka87__openve_a", "space")]
+    # 没有结果目录的仓库不上传
+    assert not watch.publish_repo_to_space(api, "sanaka87/OpenVE-score", "sanaka87/openve_none", str(out))
+
+
+def test_publish_repo_to_space_failure_does_not_raise(tmp_path, capsys):
+    out = tmp_path / "out"
+    (out / "sanaka87__openve_a").mkdir(parents=True)
+    assert not watch.publish_repo_to_space(FakeSpaceApi(fail=True), "s", "sanaka87/openve_a", str(out))
+    assert "上传失败" in capsys.readouterr().err
+
+
+def test_main_publishes_each_repo_as_soon_as_it_has_new_scores(tmp_path, monkeypatch):
+    """一个仓库整轮失败（比如出现新类别）不该挡住其它仓库的分上 Space。"""
+    calls = []
+    monkeypatch.setattr(watch, "preflight_env", lambda: None)
+    monkeypatch.setattr(watch, "load_api_keys", lambda _f: ["k"])
+    monkeypatch.setattr(watch, "discover_repos", lambda *a, **k: ["sanaka87/openve_bad", "sanaka87/openve_good"])
+
+    def fake_process(api, repo_id, args, keys):
+        if repo_id.endswith("bad"):
+            raise RuntimeError("这个仓库全部失败")
+        (tmp_path / "out" / repo_id.replace("/", "__")).mkdir(parents=True, exist_ok=True)
+        return 3, 10, 3
+
+    monkeypatch.setattr(watch, "process_repo", fake_process)
+    monkeypatch.setattr(watch, "publish_repo_to_space", lambda api, space, repo, out: calls.append(repo) or True)
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda token=None: FakeSpaceApi())
+    rc = watch.main(["--once", "--out-dir", str(tmp_path / "out"), "--space-repo", "sanaka87/OpenVE-score"])
+    assert rc == 0
+    assert calls == ["sanaka87/openve_good"], "坏仓库不上传，但也不能挡住好仓库"

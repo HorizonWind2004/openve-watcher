@@ -123,6 +123,19 @@ sanaka87/openve_33f_fa_cfg1	local_add/0012_local_add_Add_a_cat
 
 ---
 
+### 实时发布到汇总 Space
+
+```bash
+openve-watch --collection sanaka87/openve-inference-results-6aa0ee63aae5af91c0a07e5a \
+  --out-dir ./openve-scores --space-repo sanaka87/OpenVE-score
+```
+
+`--space-repo` 让每个仓库**一有新分就立刻**把它的 `*.jsonl` 和 `progress.txt` 传到 Space
+的 `<owner>__<name>/` 目录，不等整轮结束。以前「整轮补齐才上传」的做法有个坑：
+只要有一个仓库打不完（例如出现了还没有评分提示词的新类别，157 条全部失败），
+所有仓库新打的分都会被卡住，Space 看起来像停了一天。现在失败只影响那个仓库自己，
+上传失败也只打一行警告，不中断打分。
+
 ## 服务端：上传（我们这侧运行，你不用管）
 
 ```bash

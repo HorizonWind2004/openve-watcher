@@ -275,6 +275,32 @@ def _upload_scores(api, repo_id, out_path, model):
         print(f"[push-scores] 回传失败（本地结果已保存）: {exc}", file=sys.stderr, flush=True)
 
 
+def publish_repo_to_space(api, space_repo, repo_id, out_dir):
+    """把一个仓库的分数（jsonl + progress.txt）立刻传到汇总 Space。
+
+    按仓库传而不是整轮传完再传：某个仓库打不完或一直失败（比如出现了还没有
+    评分提示词的新类别），只卡它自己，别的仓库新打的分照样当轮可见。
+    Space 里的目录布局与 --out-dir 一致：``<owner>__<name>/<文件>``。
+    """
+    repo_dir = Path(out_dir) / repo_id.replace("/", "__")
+    if not repo_dir.is_dir():
+        return False
+    try:
+        api.upload_folder(
+            folder_path=str(repo_dir),
+            path_in_repo=repo_dir.name,
+            repo_id=space_repo,
+            repo_type="space",
+            allow_patterns=["*.jsonl", "*.txt"],
+            commit_message=f"update OpenVE scores: {repo_id}",
+        )
+        print(f"[space] {repo_id} -> {space_repo}", flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 发布失败不影响打分和本地结果
+        print(f"[space] {repo_id} 上传失败（本地结果已保存）: {exc}", file=sys.stderr, flush=True)
+        return False
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="openve-watch",
@@ -307,6 +333,11 @@ def build_parser():
         help="把 --out-dir 的改动提交并推到自己 fork 的 GitHub 仓库",
     )
     parser.add_argument("--git-remote", default="origin", help="--git-publish 推到哪个 remote")
+    parser.add_argument(
+        "--space-repo",
+        default=None,
+        help="每个仓库一有新分就立刻把它的结果传到这个 HF Space（如 sanaka87/OpenVE-score），不等整轮",
+    )
     parser.add_argument("--limit", type=int, default=0, help="每个仓库每轮最多打多少条（0 = 不限）")
     parser.add_argument("--once", action="store_true", help="只跑一轮就退出")
     parser.add_argument("--interval", type=float, default=300.0, help="轮询间隔（秒）")
@@ -335,6 +366,8 @@ def main(argv=None):
                 print(f"[error] {repo_id}: {exc}", file=sys.stderr, flush=True)
                 continue
             print(f"[watch] {repo_id}: 仓库 {total} 条，已打分 {done}，本轮新增 {added}", flush=True)
+            if args.space_repo and added:
+                publish_repo_to_space(api, args.space_repo, repo_id, args.out_dir)
         if args.git_publish:
             print(f"[git] {publish.publish(args.out_dir, repo_root=args.out_dir, remote=args.git_remote)}", flush=True)
         if args.once:
