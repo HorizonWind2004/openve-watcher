@@ -82,3 +82,45 @@ def test_json_mode_is_the_only_deviation_and_is_additive():
     with_json = system_prompt("global_style", "x", json_mode=True)
     assert with_json.startswith(plain)
     assert len(with_json) > len(plain)
+
+
+# --- I2V-transfer 补的类别（OpenVE++ / relight / local change） ------------------------
+
+from tests.data import i2v_transfer_prompts as i2v
+
+I2V_TYPES = {
+    "action_edit": "ACTION_EDIT",
+    "expression_edit": "EXPRESSION_EDIT",
+    "motion_edit": "MOTION_EDIT",
+    "relight": "RELIGHT",
+    "color_change": "COLOR_CHANGE",
+    "texture_change": "TEXTURE_CHANGE",
+    "shape_change": "SHAPE_CHANGE",
+    "move_edit": "MOVE_EDIT",
+    "scale_edit": "SCALE_EDIT",
+}
+
+
+@pytest.mark.parametrize("key,const", sorted(I2V_TYPES.items()))
+def test_non_official_prompts_match_i2v_transfer_verbatim(key, const):
+    """Gemini 分要能和 I2V-transfer 那边同一提示词打的 Qwen 分对照，原文必须一致。"""
+    assert prompts.NON_OFFICIAL_PROMPT_TYPE[key] == getattr(i2v, const)
+
+
+@pytest.mark.parametrize("key", sorted(I2V_TYPES))
+def test_openve_pp_types_are_scored_by_default_and_tagged(key):
+    from openve_watcher.watch import NON_OFFICIAL_RUBRIC, rubric_for
+
+    assert rubric_for(key) == NON_OFFICIAL_RUBRIC
+    text = system_prompt(key, "Make the person smile.", json_mode=False)
+    assert "Make the person smile." in text
+
+
+def test_official_only_refuses_non_official_types():
+    from openve_watcher.watch import rubric_for
+
+    assert rubric_for("expression_edit", official_only=True) is None
+    with pytest.raises(KeyError):
+        system_prompt("expression_edit", "x", json_mode=False, official_only=True)
+    # 官方类别不受影响
+    assert rubric_for("global_style", official_only=True) == "kiwi-official"

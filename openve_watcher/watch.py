@@ -126,10 +126,30 @@ def fetch_sample(api, repo_id, edited_type, base, cache_dir):
     return meta, Path(local["original"]), Path(local["edited"])
 
 
-def system_prompt(edited_type, edit_prompt, json_mode):
-    template = prompts.prompt_type.get(edited_type)
-    if template is None:
+OFFICIAL_RUBRIC = "kiwi-official"
+NON_OFFICIAL_RUBRIC = "i2v-transfer"
+
+
+def rubric_for(edited_type, official_only=False):
+    """这个类别用哪套评分标准；两套都没有就返回 None。
+
+    官方 Kiwi-Edit 的类别优先。OpenVE++ 的 action/expression/motion、relight、
+    local change 的 color/texture/shape 只有 I2V-transfer 补的提示词，默认也打，
+    结果行里用 ``rubric`` 标出来，免得和官方口径的分混在一起比。
+    """
+    if edited_type in prompts.prompt_type:
+        return OFFICIAL_RUBRIC
+    if not official_only and edited_type in prompts.NON_OFFICIAL_PROMPT_TYPE:
+        return NON_OFFICIAL_RUBRIC
+    return None
+
+
+def system_prompt(edited_type, edit_prompt, json_mode, official_only=False):
+    rubric = rubric_for(edited_type, official_only)
+    if rubric is None:
         raise KeyError(f"没有这个类别的评分提示词: {edited_type}")
+    table = prompts.prompt_type if rubric == OFFICIAL_RUBRIC else prompts.NON_OFFICIAL_PROMPT_TYPE
+    template = table[edited_type]
     text = template.format(edit_prompt=edit_prompt)
     if json_mode:
         text += parse.JSON_INSTRUCTION
@@ -146,7 +166,8 @@ def score_sample(api, repo_id, edited_type, base, args, keys, key_index):
         raise ValueError(
             f"meta.json 与目录不一致: 目录 {edited_type}/{base}，meta {meta.edited_type}/{meta.base}"
         )
-    prompt = system_prompt(meta.edited_type, meta.prompt, args.json_mode)
+    official_only = getattr(args, "official_only", False)
+    prompt = system_prompt(meta.edited_type, meta.prompt, args.json_mode, official_only)
     scores, raw = evaluate_video_pair(
         original,
         edited,
@@ -162,6 +183,7 @@ def score_sample(api, repo_id, edited_type, base, args, keys, key_index):
         "prompt": meta.prompt,
         "scores": scores,
         "protocol": "gemini_video",
+        "rubric": rubric_for(meta.edited_type, official_only),
         "model": args.model,
         "repo": repo_id,
         "raw": raw,
@@ -195,6 +217,13 @@ def process_repo(api, repo_id, args, keys):
     done = progress.load(state) | from_jsonl
 
     pending = [(t, b) for (t, b) in sorted(samples) if (t, b) not in done]
+    # 没有评分标准的类别每轮都会 KeyError 重试一遍，直接跳过并说明，不当失败刷屏。
+    official_only = getattr(args, "official_only", False)
+    unscorable = [(t, b) for (t, b) in pending if rubric_for(t, official_only) is None]
+    if unscorable:
+        kinds = sorted({t for t, _ in unscorable})
+        print(f"[skip] {repo_id}: {len(unscorable)} 条类别没有评分提示词 {kinds}", flush=True)
+        pending = [(t, b) for (t, b) in pending if rubric_for(t, official_only) is not None]
     print(f"[progress] {repo_id}: {progress.summarise(len(samples), len(done), len(pending))}", flush=True)
     if args.limit:
         pending = pending[: args.limit]
@@ -262,6 +291,11 @@ def build_parser():
     parser.add_argument("--timeout", type=float, default=600.0, help="单条上传+打分的超时（秒）")
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--json-mode", action="store_true", help="要求 Gemini 返回 JSON")
+    parser.add_argument(
+        "--official-only",
+        action="store_true",
+        help="只打官方 Kiwi-Edit 有提示词的类别（旧行为）；默认也打 OpenVE++ / relight / local change",
+    )
     parser.add_argument(
         "--push-scores",
         action="store_true",

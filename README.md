@@ -178,10 +178,20 @@ openve-push \
    OpenVE-Bench 的七类计划需要它们，所以补进了映射，用的仍是官方原文。
    `camera_edit` / `camera_multi_shot_edit` 同理。
 
-2. **官方没有提示词的 7 个类别被隔离了。** `color_change`、`texture_change`、
-   `shape_change`、`relight`、`action_edit`、`move_edit`、`scale_edit` 的提示词不是官方的，
-   放在 `prompts.NON_OFFICIAL_PROMPT_TYPE` 里，**不在** `prompt_type` 中。
-   打分默认走 `prompt_type`，所以不可能静默用上非官方标准。要用得显式合并。
+2. **官方没有提示词的类别：默认也打，但用 `rubric` 字段和官方口径分开。**
+   OpenVE++ 的 `action_edit` / `expression_edit` / `motion_edit`、`relight`、
+   local change 的 `color_change` / `texture_change` / `shape_change`，以及 `move_edit` / `scale_edit`，
+   提示词是 I2V-transfer 补的，放在 `prompts.NON_OFFICIAL_PROMPT_TYPE`，**不在** `prompt_type` 里
+   （`prompt_type` 仍然只含官方原文，有测试断言）。它们与 I2V-transfer 的
+   `src/i2v_opd/evaluation/score.py` **逐字一致**（基准 `tests/data/i2v_transfer_prompts.py`），
+   所以这里打出的 Gemini 分可以和那边同一提示词打的 Qwen 分对照。
+
+   打分时先查官方表、再查非官方表；每条结果写 `"rubric": "kiwi-official"` 或 `"i2v-transfer"`，
+   汇总时按它分开，别把两种口径的分放在一起平均。只想打官方类别就加 `--official-only`，
+   这时没有官方提示词的样本会被跳过并打印 `[skip]`，而不是每轮报一次失败。
+
+   把 OpenVE++ / relight / local change 的推理仓库加进 collection（或名字以 `openve_` 开头），
+   watcher 就会自动发现并打分，不需要改启动参数。
 
 3. **`--json-mode` 是我们加的**，默认关闭。它只在官方文本**后面追加**一句要求返回 JSON，
    不改动官方原文（有测试断言这一点）。要完全对齐官方就别加这个开关。

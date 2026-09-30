@@ -216,3 +216,46 @@ def test_preflight_disables_hf_transfer_when_package_missing(monkeypatch, capsys
 def test_preflight_leaves_env_alone_when_unset(monkeypatch):
     monkeypatch.delenv("HF_HUB_ENABLE_HF_TRANSFER", raising=False)
     assert watch.preflight_env() == []
+
+
+def _pp_repo_files():
+    files = []
+    for t, b in [("action_edit", "a"), ("expression_edit", "e"), ("motion_edit", "m"), ("relight", "r"), ("global_style", "g")]:
+        files += [f"samples/{t}/{b}/meta.json", f"samples/{t}/{b}/original.mp4", f"samples/{t}/{b}/edited.mp4"]
+    return files
+
+
+def _fake_fetch(_api, _repo, edited_type, base, _cache):
+    return manifest.SampleMeta(base=base, edited_type=edited_type, prompt="p"), Path("o"), Path("e")
+
+
+def test_process_repo_scores_openve_pp_types_by_default(tmp_path, monkeypatch):
+    """OpenVE++ 仓库（action/expression/motion/relight）放进 collection 就该被打分，并标出评分口径。"""
+    api = FakeApi(files=_pp_repo_files())
+    args = _args(tmp_path)
+    monkeypatch.setattr(watch, "fetch_sample", _fake_fetch)
+    monkeypatch.setattr("openve_watcher.gemini.evaluate_video_pair", lambda *a, **k: ([4, 4, 4], "raw"))
+
+    added, total, _ = watch.process_repo(api, "sanaka87/openve_pp_x", args, ["k"])
+    assert (added, total) == (5, 5)
+    rows = [json.loads(l) for l in (tmp_path / "out" / "sanaka87__openve_pp_x").glob("*.jsonl").__next__().read_text().splitlines()]
+    rubric = {r["edited_type"]: r["rubric"] for r in rows}
+    assert rubric == {
+        "action_edit": "i2v-transfer",
+        "expression_edit": "i2v-transfer",
+        "motion_edit": "i2v-transfer",
+        "relight": "i2v-transfer",
+        "global_style": "kiwi-official",
+    }
+
+
+def test_process_repo_official_only_skips_non_official_types_quietly(tmp_path, monkeypatch, capsys):
+    api = FakeApi(files=_pp_repo_files())
+    args = _args(tmp_path, official_only=True)
+    monkeypatch.setattr(watch, "fetch_sample", _fake_fetch)
+    monkeypatch.setattr("openve_watcher.gemini.evaluate_video_pair", lambda *a, **k: ([4, 4, 4], "raw"))
+
+    added, total, _ = watch.process_repo(api, "sanaka87/openve_pp_x", args, ["k"])
+    assert (added, total) == (1, 5), "只打 global_style"
+    captured = capsys.readouterr()
+    assert "[skip]" in captured.out and "[fail]" not in captured.err
